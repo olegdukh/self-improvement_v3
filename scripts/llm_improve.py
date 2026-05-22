@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Gemini-based repository self-improvement agent.
-
-The agent creates a new branch, asks Gemini for a small safe improvement,
-writes the proposed files, commits the change, pushes the branch and opens a PR.
-"""
+"""Gemini-based repository self-improvement agent."""
 
 from __future__ import annotations
 
@@ -20,12 +16,14 @@ import requests
 from google import genai
 
 ROOT = Path(__file__).resolve().parents[1]
+
 ALLOWED_FILES = [
     "app/calculator.py",
     "tests/test_calculator.py",
     "README.md",
     "IMPROVEMENTS.md",
 ]
+
 PROTECTED_SIGNATURES = [
     "def add(a: int | float, b: int | float) -> int | float:",
     "def subtract(a: int | float, b: int | float) -> int | float:",
@@ -36,7 +34,7 @@ PROTECTED_SIGNATURES = [
 
 def run(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
     print("+", " ".join(cmd))
-    return subprocess.run(cmd, cwd=ROOT, text=True, check=check, capture_output=False)
+    return subprocess.run(cmd, cwd=ROOT, text=True, check=check)
 
 
 def read_file(path: str) -> str:
@@ -47,11 +45,12 @@ def read_file(path: str) -> str:
 
 
 def extract_json(text: str) -> dict[str, Any]:
-    """Extract JSON object from model output."""
     text = text.strip()
+
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
+
     try:
         return json.loads(text)
     except json.JSONDecodeError:
@@ -70,7 +69,26 @@ def validate_files(files: dict[str, str]) -> None:
     if calculator:
         for signature in PROTECTED_SIGNATURES:
             if signature not in calculator:
-                raise ValueError(f"Protected function signature was changed or removed: {signature}")
+                raise ValueError(
+                    f"Protected function signature was changed or removed: {signature}"
+                )
+
+
+def fallback_improvement() -> dict[str, str]:
+    improvements = read_file("IMPROVEMENTS.md")
+
+    if not improvements.strip():
+        improvements = "# Improvements\n"
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+
+    return {
+        "IMPROVEMENTS.md": (
+            improvements.rstrip()
+            + f"\n- {timestamp} fallback automated improvement "
+            + "because Gemini API was unavailable.\n"
+        )
+    }
 
 
 def call_gemini() -> dict[str, str]:
@@ -79,7 +97,7 @@ def call_gemini() -> dict[str, str]:
         raise RuntimeError("GEMINI_API_KEY or GOOGLE_API_KEY secret is required")
 
     client = genai.Client(api_key=api_key)
-    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
+    model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite")
 
     context = "\n\n".join(
         f"--- {path} ---\n{read_file(path)}" for path in ALLOWED_FILES
@@ -113,11 +131,15 @@ Current repository content:
 
     response = client.models.generate_content(model=model, contents=prompt)
     data = extract_json(response.text or "")
+
     files = data.get("files")
     if not isinstance(files, dict) or not files:
         raise ValueError("Model did not return any files")
-    validate_files(files)
-    return {str(k): str(v) for k, v in files.items()}
+
+    normalized_files = {str(k): str(v) for k, v in files.items()}
+    validate_files(normalized_files)
+
+    return normalized_files
 
 
 def write_files(files: dict[str, str]) -> None:
@@ -128,20 +150,35 @@ def write_files(files: dict[str, str]) -> None:
 
 
 def has_changes() -> bool:
-    result = subprocess.run(["git", "status", "--porcelain"], cwd=ROOT, text=True, capture_output=True, check=True)
+    result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
     return bool(result.stdout.strip())
 
 
 def create_pull_request(branch: str) -> None:
     token = os.environ["GITHUB_TOKEN"]
     repo = os.environ["GITHUB_REPOSITORY"]
+
     url = f"https://api.github.com/repos/{repo}/pulls"
+
     payload = {
         "title": f"AI self-improvement: {branch}",
         "head": branch,
         "base": os.getenv("BASE_BRANCH", "main"),
-        "body": "Automated Gemini-generated self-improvement PR. Function names and argument counts are protected by the agent prompt and validation.",
+        "body": (
+            "Automated Gemini-generated self-improvement PR.\n\n"
+            "Function names and argument counts are protected by the agent "
+            "prompt and validation.\n\n"
+            "If Gemini API quota is unavailable, the agent uses a safe "
+            "fallback improvement so the automation pipeline remains testable."
+        ),
     }
+
     response = requests.post(
         url,
         headers={
@@ -152,8 +189,12 @@ def create_pull_request(branch: str) -> None:
         json=payload,
         timeout=30,
     )
+
     if response.status_code >= 300:
-        raise RuntimeError(f"Failed to create PR: {response.status_code} {response.text}")
+        raise RuntimeError(
+            f"Failed to create PR: {response.status_code} {response.text}"
+        )
+
     print("Created PR:", response.json().get("html_url"))
 
 
@@ -165,18 +206,13 @@ def main() -> int:
     run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"])
     run(["git", "checkout", "-b", branch])
 
-try:
-    files = call_gemini()
-except Exception as exc:
-    print(f"Gemini unavailable: {exc}")
-    print("Using fallback improvement")
+    try:
+        files = call_gemini()
+    except Exception as exc:
+        print(f"Gemini unavailable: {exc}")
+        print("Using fallback improvement")
+        files = fallback_improvement()
 
-    improvements = read_file("IMPROVEMENTS.md")
-
-        files = {
-            "IMPROVEMENTS.md": improvements
-            + f"\n- {datetime.now(timezone.utc).isoformat()} fallback automated improvement\n"
-        }
     write_files(files)
 
     if not has_changes():
@@ -188,6 +224,7 @@ except Exception as exc:
     run(["git", "commit", "-m", "AI self-improvement"])
     run(["git", "push", "origin", branch])
     create_pull_request(branch)
+
     return 0
 
 
