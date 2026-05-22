@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
-"""Create temporary Hetzner VPS and register it as GitHub self-hosted runner."""
-
 from __future__ import annotations
 
-import base64
 import json
 import os
 import sys
-import time
-from pathlib import Path
 from typing import Any
 
 import requests
@@ -36,7 +31,6 @@ def github_headers() -> dict[str, str]:
     return {
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
     }
 
 
@@ -67,16 +61,6 @@ def get_runner_registration_token(repo: str) -> str:
 
 
 def create_firewall(name: str) -> int:
-    """Create firewall without public SSH access.
-
-    Inbound:
-      - no public SSH
-      - no inbound ports required
-
-    Outbound:
-      - allowed, because GitHub runner and Tailscale need outbound access
-    """
-
     payload = {
         "name": f"{name}-fw",
         "rules": [
@@ -92,11 +76,6 @@ def create_firewall(name: str) -> int:
                 "destination_ips": ["0.0.0.0/0", "::/0"],
                 "port": "any",
             },
-            {
-                "direction": "out",
-                "protocol": "icmp",
-                "destination_ips": ["0.0.0.0/0", "::/0"],
-            },
         ],
     }
 
@@ -109,12 +88,12 @@ def build_cloud_init(runner_name: str, repo: str, registration_token: str) -> st
 
     tailscale_block = ""
     if tailscale_authkey:
-        tailscale_block = f"""
+        tailscale_block = f'''
     curl -fsSL https://tailscale.com/install.sh | sh
-    tailscale up --authkey "{tailscale_authkey}" --hostname "{runner_name}" --ssh=false
-"""
+    tailscale up --authkey "{tailscale_authkey}" --hostname "{runner_name}" --ssh=false || true
+'''
 
-    return f"""#cloud-config
+    return f'''#cloud-config
 package_update: true
 package_upgrade: false
 
@@ -134,7 +113,8 @@ packages:
 
 runcmd:
   - |
-    set -euxo pipefail
+    #!/bin/bash
+    set -eux
 
     useradd -m -s /bin/bash runner || true
     mkdir -p /opt/actions-runner
@@ -145,82 +125,57 @@ runcmd:
     RUNNER_VERSION=$(curl -s https://api.github.com/repos/actions/runner/releases/latest | jq -r '.tag_name' | sed 's/^v//')
     curl -L -o actions-runner-linux-x64.tar.gz "https://github.com/actions/runner/releases/download/v${{RUNNER_VERSION}}/actions-runner-linux-x64-${{RUNNER_VERSION}}.tar.gz"
     tar xzf actions-runner-linux-x64.tar.gz
-    chown -R runner:runner /opt/actions-runner
 
     ./bin/installdependencies.sh
 
 {tailscale_block}
 
-    sudo -u runner ./config.sh \\
-      --url "https://github.com/{repo}" \\
-      --token "{registration_token}" \\
-      --name "{runner_name}" \\
-      --labels "hetzner,cx23,ephemeral" \\
-      --unattended \\
-      --ephemeral \\
+    sudo -u runner ./config.sh \
+      --url "https://github.com/{repo}" \
+      --token "{registration_token}" \
+      --name "{runner_name}" \
+      --labels "hetzner,cx23,ephemeral" \
+      --unattended \
+      --ephemeral \
       --replace
 
-    ./svc.sh install runner
+    ./svc.sh install
     ./svc.sh start
-"""
+'''
 
 
-def create_server(
-    name: str,
-    firewall_id: int,
-    user_data: str,
-    location: str,
-) -> int:
-    server_type = os.getenv("HCLOUD_SERVER_TYPE", "cx23")
-    image = os.getenv("HCLOUD_IMAGE", "ubuntu-24.04")
-
+def create_server(name: str, firewall_id: int, user_data: str, location: str) -> int:
     payload = {
         "name": name,
-        "server_type": server_type,
-        "image": image,
+        "server_type": os.getenv("HCLOUD_SERVER_TYPE", "cx23"),
+        "image": os.getenv("HCLOUD_IMAGE", "ubuntu-24.04"),
         "location": location,
         "user_data": user_data,
         "ssh_keys": [],
-        "firewalls": [
-            {
-                "firewall": firewall_id,
-            }
-        ],
-        "labels": {
-            "managed-by": "github-actions",
-            "purpose": "ephemeral-self-hosted-runner",
-            "runner-name": name,
-        },
+        "firewalls": [{"firewall": firewall_id}],
     }
 
     data = post_json(f"{HCLOUD_API}/servers", hcloud_headers(), payload)
     return data["server"]["id"]
 
 
-def create_server_with_fallback(
-    name: str,
-    firewall_id: int,
-    user_data: str,
-) -> tuple[int, str]:
+def create_server_with_fallback(name: str, firewall_id: int, user_data: str):
     locations = os.getenv("HCLOUD_LOCATIONS", "fsn1,nbg1,hel1").split(",")
 
-    last_error: Exception | None = None
+    last_error = None
 
     for location in locations:
         location = location.strip()
-        if not location:
-            continue
 
         try:
-            print(f"Trying to create Hetzner server in location: {location}")
+            print(f"Trying location: {location}")
             server_id = create_server(name, firewall_id, user_data, location)
-            print(f"Created server {server_id} in location {location}")
             return server_id, location
         except Exception as exc:
+            print(f"Location failed: {location} -> {exc}")
             last_error = exc
-            print(f"Failed to create server in {location}: {exc}")
 
-    raise RuntimeError(f"Failed to create server in all locations: {last_error}")
+    raise RuntimeError(f"All locations failed: {last_error}")
 
 
 def main() -> int:
@@ -235,7 +190,11 @@ def main() -> int:
     user_data = build_cloud_init(name, repo, registration_token)
 
     try:
-        server_id, location = create_server_with_fallback(name, firewall_id, user_data)
+        server_id, location = create_server_with_fallback(
+            name,
+            firewall_id,
+            user_data,
+        )
     except Exception:
         delete_json(f"{HCLOUD_API}/firewalls/{firewall_id}", hcloud_headers())
         raise
