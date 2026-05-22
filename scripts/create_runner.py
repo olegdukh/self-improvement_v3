@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Create a temporary Hetzner Cloud VM and register it as a GitHub runner."""
+"""Create a temporary Hetzner Cloud VM and register it as a GitHub runner.
+
+The VM is created without public SSH access. Inbound firewall rules are empty,
+Tailscale is installed through cloud-init, and the GitHub Actions runner connects
+outbound to GitHub.
+"""
 
 from __future__ import annotations
 
@@ -24,7 +29,10 @@ def require(name: str) -> str:
 
 
 def hcloud_headers() -> dict[str, str]:
-    return {"Authorization": f"Bearer {require('HETZNER_TOKEN')}", "Content-Type": "application/json"}
+    return {
+        "Authorization": f"Bearer {require('HETZNER_TOKEN')}",
+        "Content-Type": "application/json",
+    }
 
 
 def github_headers() -> dict[str, str]:
@@ -111,44 +119,72 @@ systemctl enable --now github-runner.service
 
     encoded_script = base64.b64encode(setup_script.encode()).decode()
 
-    return dedent(f"""\
-    #cloud-config
-    package_update: true
-    package_upgrade: false
-    packages:
-      - curl
-      - jq
-      - git
-      - python3
-      - python3-pip
-      - ca-certificates
-      - sudo
-    write_files:
-      - path: /root/setup-github-runner.sh
-        permissions: '0755'
-        encoding: b64
-        content: {encoded_script}
-    runcmd:
-      - curl -fsSL https://tailscale.com/install.sh | sh
-      - tailscale up --auth-key={tailscale_authkey} --hostname={runner_name} --ssh --accept-dns=false
-      - systemctl disable --now ssh || true
-      - systemctl disable --now sshd || true
-      - /root/setup-github-runner.sh
-    """)
+    return dedent(
+        f"""\
+        #cloud-config
+        package_update: true
+        package_upgrade: false
+        packages:
+          - curl
+          - jq
+          - git
+          - python3
+          - python3-pip
+          - ca-certificates
+          - sudo
+        write_files:
+          - path: /root/setup-github-runner.sh
+            permissions: '0755'
+            encoding: b64
+            content: {encoded_script}
+        runcmd:
+          - curl -fsSL https://tailscale.com/install.sh | sh
+          - tailscale up --auth-key={tailscale_authkey} --hostname={runner_name} --ssh --accept-dns=false
+          - systemctl disable --now ssh || true
+          - systemctl disable --now sshd || true
+          - /root/setup-github-runner.sh
+        """
+    )
 
 
-def create_server(name: str, firewall_id: int, user_data: str) -> int:
+def create_server(name: str, firewall_id: int, user_data: str, location: str) -> int:
     payload = {
         "name": name,
         "server_type": os.getenv("HETZNER_SERVER_TYPE", "cx23"),
         "image": os.getenv("HETZNER_IMAGE", "ubuntu-24.04"),
-        "location": os.getenv("HETZNER_LOCATION", "fsn1"),
+        "location": location,
         "user_data": user_data,
         "firewalls": [{"firewall": firewall_id}],
-        "labels": {"purpose": "github-actions-runner", "managed_by": "self-improvement"},
+        "labels": {
+            "purpose": "github-actions-runner",
+            "managed_by": "self-improvement",
+        },
     }
     data = post_json(f"{HCLOUD_API}/servers", hcloud_headers(), payload)
     return int(data["server"]["id"])
+
+
+def create_server_with_fallback(name: str, firewall_id: int, user_data: str) -> int:
+    """Try several Hetzner locations when one location has no capacity."""
+    locations_raw = os.getenv("HETZNER_LOCATIONS") or os.getenv("HETZNER_LOCATION") or "fsn1,nbg1,hel1"
+    locations = [location.strip() for location in locations_raw.split(",") if location.strip()]
+
+    if not locations:
+        raise RuntimeError("No Hetzner locations configured")
+
+    last_error: Exception | None = None
+
+    for location in locations:
+        try:
+            print(f"Trying Hetzner location: {location}", file=sys.stderr)
+            server_id = create_server(name, firewall_id, user_data, location)
+            print(f"Created server in location: {location}", file=sys.stderr)
+            return server_id
+        except RuntimeError as exc:
+            last_error = exc
+            print(f"Failed to create server in {location}: {exc}", file=sys.stderr)
+
+    raise RuntimeError(f"Failed to create server in all configured locations: {last_error}")
 
 
 def main() -> int:
@@ -162,9 +198,17 @@ def main() -> int:
     name = f"gha-{runner_label}"[:63]
     firewall_id = create_firewall(f"fw-{name}"[:63])
     user_data = build_cloud_init(repo, runner_token, runner_label)
-    server_id = create_server(name, firewall_id, user_data)
+    server_id = create_server_with_fallback(name, firewall_id, user_data)
 
-    print(json.dumps({"server_id": server_id, "firewall_id": firewall_id, "runner_label": runner_label}))
+    print(
+        json.dumps(
+            {
+                "server_id": server_id,
+                "firewall_id": firewall_id,
+                "runner_label": runner_label,
+            }
+        )
+    )
     return 0
 
 
