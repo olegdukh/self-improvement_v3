@@ -165,11 +165,11 @@ def main() -> int:
     run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"])
     run(["git", "checkout", "-b", branch])
 
-try:
+    try:
         files = call_gemini()
-except Exception as exc:
-    print(f"Gemini unavailable: {exc}")
-    print("Using fallback improvement")
+    except Exception as exc:
+      print(f"Gemini unavailable: {exc}")
+      print("Using fallback improvement")
 
     improvements = read_file("IMPROVEMENTS.md")
 
