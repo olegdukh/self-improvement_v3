@@ -79,7 +79,7 @@ def call_gemini() -> dict[str, str]:
         raise RuntimeError("GEMINI_API_KEY or GOOGLE_API_KEY secret is required")
 
     client = genai.Client(api_key=api_key)
-    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 
     context = "\n\n".join(
         f"--- {path} ---\n{read_file(path)}" for path in ALLOWED_FILES
