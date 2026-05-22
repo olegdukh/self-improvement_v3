@@ -1,0 +1,87 @@
+name: PR tests on ephemeral Hetzner runner
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  create-runner:
+    name: Create Hetzner CX23 runner
+    runs-on: ubuntu-latest
+    outputs:
+      server_id: ${{ steps.create.outputs.server_id }}
+      firewall_id: ${{ steps.create.outputs.firewall_id }}
+      runner_label: ${{ steps.meta.outputs.runner_label }}
+      runner_labels_json: ${{ steps.meta.outputs.runner_labels_json }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Prepare unique runner label
+        id: meta
+        run: |
+          LABEL="hcloud-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "runner_label=${LABEL}" >> "$GITHUB_OUTPUT"
+          echo "runner_labels_json=[\"self-hosted\",\"${LABEL}\"]" >> "$GITHUB_OUTPUT"
+
+      - name: Create one-click Hetzner runner
+        id: create
+        env:
+          HETZNER_TOKEN: ${{ secrets.HETZNER_TOKEN }}
+          TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          HETZNER_SERVER_TYPE: cx23
+        run: |
+          ./deploy.sh create "${{ steps.meta.outputs.runner_label }}" | tee runner.json
+          echo "server_id=$(jq -r .server_id runner.json)" >> "$GITHUB_OUTPUT"
+          echo "firewall_id=$(jq -r .firewall_id runner.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for runner to be online
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python scripts/wait_for_runner.py "${{ steps.meta.outputs.runner_label }}"
+
+  test:
+    name: Run pytest on self-hosted runner
+    needs: create-runner
+    runs-on: ${{ fromJson(needs.create-runner.outputs.runner_labels_json) }}
+    steps:
+      - name: Checkout Pull Request code
+        uses: actions/checkout@v4
+
+      - name: Install test dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run calculator tests
+        run: python3 -m pytest -v
+
+  cleanup:
+    name: Delete Hetzner runner
+    needs:
+      - create-runner
+      - test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Destroy Hetzner server and firewall
+        env:
+          HETZNER_TOKEN: ${{ secrets.HETZNER_TOKEN }}
+        run: ./deploy.sh destroy "${{ needs.create-runner.outputs.server_id }}" "${{ needs.create-runner.outputs.firewall_id }}"
