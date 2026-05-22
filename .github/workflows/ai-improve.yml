@@ -10,7 +10,7 @@ permissions:
   pull-requests: write
 
 env:
-  GEMINI_MODEL: gemini-pro
+  GEMINI_MODEL: gemini-2.5-flash
 
 jobs:
   improve:
