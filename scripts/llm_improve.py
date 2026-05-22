@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""OpenAI-based repository self-improvement agent.
+"""Gemini-based repository self-improvement agent.
 
-The agent creates a new branch, asks OpenAI for a small safe improvement,
+The agent creates a new branch, asks Gemini for a small safe improvement,
 writes the proposed files, commits the change, pushes the branch and opens a PR.
 """
 
@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import requests
-from openai import OpenAI
+from google import genai
 
 ROOT = Path(__file__).resolve().parents[1]
 ALLOWED_FILES = [
@@ -73,9 +73,13 @@ def validate_files(files: dict[str, str]) -> None:
                 raise ValueError(f"Protected function signature was changed or removed: {signature}")
 
 
-def call_openai() -> dict[str, str]:
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-    model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+def call_gemini() -> dict[str, str]:
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY or GOOGLE_API_KEY secret is required")
+
+    client = genai.Client(api_key=api_key)
+    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
     context = "\n\n".join(
         f"--- {path} ---\n{read_file(path)}" for path in ALLOWED_FILES
@@ -107,8 +111,8 @@ Current repository content:
 {context}
 """.strip()
 
-    response = client.responses.create(model=model, input=prompt)
-    data = extract_json(response.output_text)
+    response = client.models.generate_content(model=model, contents=prompt)
+    data = extract_json(response.text or "")
     files = data.get("files")
     if not isinstance(files, dict) or not files:
         raise ValueError("Model did not return any files")
@@ -136,7 +140,7 @@ def create_pull_request(branch: str) -> None:
         "title": f"AI self-improvement: {branch}",
         "head": branch,
         "base": os.getenv("BASE_BRANCH", "main"),
-        "body": "Automated OpenAI-generated self-improvement PR. Function names and argument counts are protected by the agent prompt and validation.",
+        "body": "Automated Gemini-generated self-improvement PR. Function names and argument counts are protected by the agent prompt and validation.",
     }
     response = requests.post(
         url,
@@ -161,7 +165,7 @@ def main() -> int:
     run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"])
     run(["git", "checkout", "-b", branch])
 
-    files = call_openai()
+    files = call_gemini()
     write_files(files)
 
     if not has_changes():

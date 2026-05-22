@@ -2,7 +2,7 @@
 
 Minimal DevOps/Python project for two related tasks:
 
-1. **Git automation task**: an OpenAI-based agent improves this repository every 2 hours and creates a Pull Request.
+1. **Git automation task**: an Gemini-based agent improves this repository every 2 hours and creates a Pull Request.
 2. **Scripting task**: tests for that Pull Request run on a temporary Hetzner Cloud VPS registered as a GitHub self-hosted runner. The VPS has no public SSH access and is deleted after tests.
 
 ## Project structure
@@ -43,8 +43,8 @@ Every 2 hours it:
 
 1. Checks out the repository.
 2. Runs `scripts/llm_improve.py`.
-3. Sends the current calculator project to OpenAI.
-4. Asks OpenAI to make one small improvement.
+3. Sends the current calculator project to Gemini.
+4. Asks Gemini to make one small improvement.
 5. Protects function names and argument count.
 6. Creates a new branch.
 7. Commits the change.
@@ -95,15 +95,15 @@ So the VM is deleted even if tests fail.
 Add these secrets in GitHub:
 
 ```text
-OPENAI_API_KEY
+GEMINI_API_KEY
 HETZNER_TOKEN
 TAILSCALE_AUTHKEY
 GH_PAT
 ```
 
-### OPENAI_API_KEY
+### GEMINI_API_KEY
 
-Your OpenAI API key used by the LLM agent.
+Your Gemini API key used by the LLM agent.
 
 ### HETZNER_TOKEN
 
@@ -203,7 +203,7 @@ export HETZNER_SERVER_TYPE=cx23
 ## End-to-end flow
 
 ```text
-OpenAI agent workflow runs every 2 hours
+Gemini agent workflow runs every 2 hours
         ↓
 Agent creates branch and PR
         ↓
