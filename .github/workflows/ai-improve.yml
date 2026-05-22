@@ -10,7 +10,7 @@ permissions:
   pull-requests: write
 
 env:
-  OPENAI_MODEL: gpt-4.1-mini
+  GEMINI_MODEL: gemini-pro
 
 jobs:
   improve:
